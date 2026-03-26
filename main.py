@@ -9,7 +9,11 @@ def main():
 
     for query in queries:
         print(f"Rodando query: {query}")
-        run_pipeline(query)
+        try:
+            run_pipeline(query)
+        except Exception as exc:
+            print(f"[ERROR] pipeline falhou para '{query}': {exc}")
+            # continue with next query
 
     print("Finalizado.")
 

@@ -1,0 +1,188 @@
+{
+  "name": "outreach_email_gmail_whatsapp_link",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "ScheduleTrigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "find",
+        "collection": "leads",
+        "query": "={\n  outreach_disabled: { $ne: true },\n  outreach_email_sent_at: { $exists: false },\n  email: { $type: 'string', $ne: '' }\n}",
+        "options": {
+          "limit": 50
+        }
+      },
+      "id": "MongoFind",
+      "name": "MongoDB - Find pending leads",
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ],
+      "credentials": {
+        "mongoDb": {
+          "id": "REPLACE_WITH_YOUR_MONGODB_CREDENTIAL_ID",
+          "name": "MongoDB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const BATCH_SIZE = 10;\n\nfunction digitsOnly(s) {\n  return String(s || '').replace(/\\D/g, '');\n}\n\nfunction buildWaLink(phoneDigits, text) {\n  if (!phoneDigits) return null;\n  const msg = encodeURIComponent(text || 'Oi! Vi seu e-mail e queria falar rapidinho por aqui.');\n  return `https://wa.me/${phoneDigits}?text=${msg}`;\n}\n\nfunction safeName(lead) {\n  const n = (lead.name || '').trim();\n  if (n) return n;\n  // fallback: parte antes de espaço do email\n  const e = (lead.email || '').trim();\n  if (e.includes('@')) return e.split('@')[0];\n  return 'tudo bem';\n}\n\nconst items = $input.all();\n\n// n8n Mongo Find retorna cada doc como item.json\nconst sliced = items.slice(0, BATCH_SIZE);\n\nreturn sliced.map((item) => {\n  const lead = item.json || {};\n  const email = String(lead.email || '').trim();\n  const name = safeName(lead);\n\n  const phoneDigits = digitsOnly(lead.phone);\n\n  const whatsappText = `Oi ${name}, tudo bem? Encontrei seu contato e queria te fazer uma pergunta rápida.`;\n  const whatsappLink = buildWaLink(phoneDigits, whatsappText);\n\n  const subject = `${name}, posso te ajudar em algo rápido?`;\n\n  const bodyLines = [\n    `Oi ${name},`,\n    '',\n    'Vi seu perfil no LinkedIn e queria entender se faz sentido conversarmos.',\n    (lead.headline ? `Headline: ${lead.headline}` : null),\n    '',\n    'Se fizer sentido, posso te mandar 2–3 exemplos rápidos e ver se encaixa.',\n    '',\n    (whatsappLink ? `WhatsApp: ${whatsappLink}` : null),\n    `LinkedIn: ${lead.linkedin_url || ''}`,\n    '',\n    'Abraço,'\n  ].filter(Boolean);\n\n  return {\n    json: {\n      ...lead,\n      outreach: {\n        to: email,\n        subject,\n        bodyText: bodyLines.join('\\n'),\n        whatsappLink,\n        phoneDigits\n      }\n    }\n  };\n});\n"
+      },
+      "id": "PrepareMessage",
+      "name": "Code - Prepare message + wa.me",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$env.SMTP_FROM || ''}}",
+        "toEmail": "={{$json.outreach.to}}",
+        "subject": "={{$json.outreach.subject}}",
+        "text": "={{$json.outreach.bodyText}}",
+        "options": {
+          "allowUnauthorizedCerts": false
+        }
+      },
+      "id": "SendEmail",
+      "name": "SMTP - Send email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_YOUR_SMTP_CREDENTIAL_ID",
+          "name": "Gmail SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function nowISO() {\n  return new Date().toISOString();\n}\n\n// Quando continueOnFail=true, o item pode vir com json + error em item.json.error\n// Em alguns nodes, o erro aparece em item.json.error.message.\nconst lead = $json;\n\nconst isError = !!lead.error;\nconst errorMsg = isError ? (lead.error.message || JSON.stringify(lead.error)) : null;\n\nreturn {\n  json: {\n    linkedin_url: lead.linkedin_url,\n    outreach_email_status: isError ? 'error' : 'sent',\n    outreach_last_error: isError ? String(errorMsg).slice(0, 2000) : null,\n    outreach_email_sent_at: isError ? null : nowISO(),\n    outreach_whatsapp_link: lead.outreach?.whatsappLink || null\n  }\n};\n"
+      },
+      "id": "BuildUpdate",
+      "name": "Code - Build Mongo update payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "collection": "leads",
+        "updateKey": "linkedin_url",
+        "updateKeyValue": "={{$json.linkedin_url}}",
+        "update": "={\n  $set: {\n    outreach_email_status: $json.outreach_email_status,\n    outreach_last_error: $json.outreach_last_error,\n    outreach_whatsapp_link: $json.outreach_whatsapp_link,\n    ...( $json.outreach_email_sent_at ? { outreach_email_sent_at: new Date($json.outreach_email_sent_at) } : {} )\n  }\n}"
+      },
+      "id": "MongoUpdate",
+      "name": "MongoDB - Update outreach status",
+      "type": "n8n-nodes-base.mongoDb",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ],
+      "credentials": {
+        "mongoDb": {
+          "id": "REPLACE_WITH_YOUR_MONGODB_CREDENTIAL_ID",
+          "name": "MongoDB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "MongoDB - Find pending leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MongoDB - Find pending leads": {
+      "main": [
+        [
+          {
+            "node": "Code - Prepare message + wa.me",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Prepare message + wa.me": {
+      "main": [
+        [
+          {
+            "node": "SMTP - Send email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SMTP - Send email": {
+      "main": [
+        [
+          {
+            "node": "Code - Build Mongo update payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Build Mongo update payload": {
+      "main": [
+        [
+          {
+            "node": "MongoDB - Update outreach status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "REPLACE_ON_IMPORT",
+  "meta": {
+    "templateCredsNotice": "Substitua os credential IDs no n8n após importar."
+  }
+}
+
